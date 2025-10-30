@@ -10,10 +10,13 @@ Handles:
 from vonage import Vonage, Auth
 from vonage_voice import CreateCallRequest
 from vonage_http_client import AuthenticationError, HttpRequestError
+from app.webhooks.websocket_events import handle_voice_websocket, call_contexts
+from app.services.appointment_agent import AppointmentReminderAgent
+from app.services.voice import make_call
 from dotenv import load_dotenv
 
 # FastAPI and pydantic
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, Request, WebSocket, Depends
 from fastapi.responses import JSONResponse
 import uvicorn
 from typing import Optional, Dict, Any
@@ -88,70 +91,6 @@ def get_webhook_url(endpoint):
     return urljoin(WEBHOOK_BASE_URL, endpoint)
 
 
-def make_call(to_number: str, max_retries: int = 3, initial_delay: int = 1) -> Optional[str]:
-    """
-    Initiate branded outbound call
-
-    Args:
-        to_number: Destination phone number
-        max_retries: Maximum retry attempts
-        initial_delay: Initial delay between retries
-
-    Returns:
-        Call UUID if successful, None otherwise
-    """
-    # Start a new call tracking flow
-    correlation_id = call_tracker.start_auth_flow(to_number)
-
-    # First Orion branded calling - get auth token and send push notification
-    token, auth_data = get_auth_token(correlation_id)
-    if token:
-        logger.info(f"Successfully obtained First Orion auth token")
-        success, push_data = send_push_notification(
-            correlation_id,
-            token,
-            VONAGE_NUMBER,
-            to_number
-        )
-        if success:
-            logger.info(f"Successfully sent First Orion push notification for {to_number}")
-        else:
-            logger.warning(f"Failed to send First Orion push notification. Call will proceed unbranded.")
-    else:
-        logger.warning(f"Failed to get First Orion auth token. Call will proceed unbranded.")
-
-    # Create the call
-    try:
-        call_request = CreateCallRequest(
-            to=[{'type': 'phone', 'number': to_number}],
-            from_={'type': 'phone', 'number': VONAGE_NUMBER},
-            ringing_timer=60,
-            ncco=[
-                {
-                    'action': 'connect',
-                    'endpoint': [
-                        {
-                            'type': 'websocket',
-                            'uri': get_webhook_url(f'ws/voice/{correlation_id}'),
-                            'content-type': 'audio/l16;rate=16000'
-                        }
-                    ]
-                }
-            ],
-            event_url=[get_webhook_url('webhooks/voice/event')],
-            event_method='POST'
-        )
-
-        response = vonage.voice.create_call(call_request)
-        logger.info(f"Call created successfully: {response.uuid}")
-
-        call_tracker.record_vonage_call(correlation_id, response)
-
-        return response.uuid
-
-    except (AuthenticationError, HttpRequestError) as e:
-        logger.error(f'Error when calling {to_number}: {str(e)}')
-        return None
 
 
 # ============================================================================
@@ -170,6 +109,14 @@ async def root():
 @app.get('/_/health')
 async def health():
     return 'OK'
+
+
+@app.websocket("/ws/voice/{call_id}")
+async def websocket_endpoint(websocket: WebSocket, call_id: str):
+    """
+    WebSocket endpoint for voice calls
+    """
+    await handle_voice_websocket(websocket, call_id)
 
 @app.post("/webhooks/sms/inbound")
 async def inbound_sms(sms: InboundSMSEvent):

@@ -6,3 +6,4 @@ pydantic
 requests
 vonage_cloud_runtime
 bson
+motor
