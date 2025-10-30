@@ -4,7 +4,7 @@ instance:
     name: dev
     runtime: python3
     region: aws.use1
-    application-id: 741f45bb-4aa3-41d0-b219-cc1c122113c8
+    application-id: a1b7cf38-4a15-413e-bef7-3844a466ee2f
     entrypoint:  [ python3, app/main.py ]
     build-script: ./build.sh
     environment:
@@ -14,5 +14,5 @@ instance:
           value: "db-3ecb6a35-A58MTBmDNnyWsCjNTkgTc"
 debug:
     name: debug
-    application-id: 5341dc11-41f2-409a-929d-b028dd8f3afc
+    application-id: 0a9fab77-d63a-43ee-b61a-58a63b3b1579
     entrypoint: [ python3, -m, debugpy, --listen, 'localhost:9229', app/main.py ]
