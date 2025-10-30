@@ -1,14 +1,10 @@
 """
-Vonage Cloud Runtime Outbound Calling App with FastAPI
+Vonage Healthcare Voice Agent with Deepgram Flux AI
 
-Simplified version focused on:
-- Outbound call automation with branded calling
-- Advanced Machine Detection (AMD)
-- Patient Appointment Management
-- FastAPI webhooks for VCR deployment
-
-Built with Vonage SDK v4, FastAPI, and Python 3.12+
-Deployed via Vonage Cloud Runtime
+Handles:
+- SMS-triggered outbound calls
+- Appointment reminders via conversational AI
+- WebSocket audio streaming for ASR and TTS
 """
 
 from vonage import Vonage, Auth
@@ -27,9 +23,9 @@ from urllib.parse import urljoin
 import logging
 
 # Import custom modules
-from first_orion import get_auth_token, send_push_notification
-from call_tracker import call_tracker
-from fastapi_requests.message import InboundMessage
+from app.branded_calling.first_orion import get_auth_token, send_push_notification
+from app.telemetry.call_tracker import call_tracker
+from app.models.events.sms_events import InboundSMSEvent
 
 # Configure global logger
 logging.basicConfig(
@@ -69,13 +65,10 @@ vonage = Vonage(auth)
 
 # Initialize FastAPI application
 app = FastAPI(
-    title="Vonage Branded Calling with IVR Survey",
-    version="2.0.0",
-    description="Branded calling demo with 3-question survey"
+    title="Healthcare Voice Agent",
+    version="1.0.0",
+    description="Branded calling with Conversational AI Voice Agent"
 )
-
-# In-memory survey state (VCR instances are ephemeral, so no persistent storage)
-survey_responses = {}
 
 
 # ============================================================================
@@ -135,26 +128,23 @@ def make_call(to_number: str, max_retries: int = 3, initial_delay: int = 1) -> O
             ringing_timer=60,
             ncco=[
                 {
-                    'action': 'record',
-                    'eventUrl': [get_webhook_url('recording')],
-                    'split': 'conversation',
-                    'channels': 2,
-                    'format': 'wav'
+                    'action': 'connect',
+                    'endpoint': [
+                        {
+                            'type': 'websocket',
+                            'uri': get_webhook_url(f'ws/voice/{correlation_id}'),
+                            'content-type': 'audio/l16;rate=16000'
+                        }
+                    ]
                 }
             ],
-            advanced_machine_detection={
-                'behavior': 'continue',
-                'mode': 'default',
-                'beep_timeout': 90
-            },
-            event_url=[get_webhook_url('event')],
+            event_url=[get_webhook_url('webhooks/voice/event')],
             event_method='POST'
         )
 
         response = vonage.voice.create_call(call_request)
         logger.info(f"Call created successfully: {response.uuid}")
 
-        # Record the Vonage call creation in our tracker
         call_tracker.record_vonage_call(correlation_id, response)
 
         return response.uuid
@@ -181,8 +171,8 @@ async def root():
 async def health():
     return 'OK'
 
-@app.post("/inbound")
-async def inbound_sms(sms: InboundMessage):
+@app.post("/webhooks/sms/inbound")
+async def inbound_sms(sms: InboundSMSEvent):
     """
     Handle inbound SMS and trigger outbound branded call
     Uses Pydantic model for validation
@@ -207,7 +197,7 @@ async def inbound_sms(sms: InboundMessage):
     }, status_code=500)
 
 
-@app.post("/event")
+@app.post("/webhooks/voice/event")
 async def event_webhook(request: Request):
     """
     Handle call events including Advanced Machine Detection results
@@ -221,264 +211,8 @@ async def event_webhook(request: Request):
     # Record this event in our call tracker
     call_tracker.record_vonage_event(conversation_uuid, data)
 
-    # Handle AMD results
-    if status == 'human':
-        logger.info("Human detected, starting IVR flow")
-        ncco = [
-            {
-                'action': 'talk',
-                'text': '<speak>This is a test of Vonage Branded Calling. I will be asking you three questions about your experience with this call. You can speak to me or use your phone keypad to respond. Say the word "Go" when you are ready.</speak>',
-                'language': 'en-US',
-                'style': 2,
-                'premium': True,
-                'bargeIn': True
-            },
-            {
-                'action': 'input',
-                'dtmf': {
-                    'maxDigits': 1,
-                    'timeOut': 10
-                },
-                'speech': {
-                    'language': 'en-US',
-                    'context': ['go', 'yes'],
-                    'startTimeout': 10,
-                    'maxDuration': 5,
-                    'endOnSilence': 1.5
-                },
-                'type': ['dtmf', 'speech'],
-                'eventUrl': [get_webhook_url('dtmf_input')],
-                'eventMethod': 'POST'
-            }
-        ]
-        return JSONResponse(content=ncco, status_code=200)
-
-    elif status == 'machine':
-        sub_state = data.get('sub_state')
-        logger.info(f'Machine detected with substate: {sub_state}')
-
-        if sub_state == 'beep_start':
-            logger.info('Beep detected, playing voicemail message')
-            ncco = [
-                {
-                    'action': 'talk',
-                    'text': '<speak>This is the TTS that will play out if an answering machine beep is detected.</speak>',
-                    'language': 'en-US',
-                    'style': 2,
-                    'premium': True
-                }
-            ]
-            return JSONResponse(content=ncco, status_code=200)
-        else:
-            logger.info("Call screener detected")
-            ncco = [
-                {
-                    'action': 'talk',
-                    'text': '<speak>This is the call screener TTS playout.</speak>',
-                    'language': 'en-US',
-                    'style': 2,
-                    'premium': True
-                }
-            ]
-            return JSONResponse(content=ncco, status_code=200)
-
     # Default response for other event types
     return JSONResponse(content={'status': 'success'}, status_code=200)
-
-
-@app.post("/dtmf_input")
-async def dtmf_input_webhook(request: Request):
-    """
-    Handle DTMF and speech input from callers during IVR interactions
-    """
-    data = await request.json()
-    conversation_uuid = data.get('conversation_uuid', 'unknown')
-
-    logger.info(f"Input received for conversation {conversation_uuid}")
-
-    # Track this event
-    if hasattr(call_tracker, 'record_vonage_event'):
-        call_tracker.record_vonage_event(conversation_uuid, data)
-
-    # Extract input from DTMF or speech
-    dtmf_data = data.get('dtmf', {})
-    dtmf = dtmf_data.get('digits') if isinstance(dtmf_data, dict) else dtmf_data
-
-    speech_results = data.get('speech', {}).get('results', [])
-    speech_text = ''
-    if speech_results and isinstance(speech_results, list) and len(speech_results) > 0:
-        if isinstance(speech_results[0], dict):
-            text_value = speech_results[0].get('text')
-            if text_value is not None:
-                speech_text = text_value.strip()
-
-    logger.info(f"DTMF: {dtmf}, Speech: {speech_text}")
-
-    # Initialize survey responses for this conversation if needed
-    if conversation_uuid not in survey_responses:
-        survey_responses[conversation_uuid] = {}
-
-    responses = survey_responses[conversation_uuid]
-
-    # Determine current step
-    if 'saw_vonage_caller_id' in responses:
-        current_step = 4  # All questions answered
-    elif 'saw_vonage_logo' in responses:
-        current_step = 3  # Two questions answered
-    elif 'device_type' in responses:
-        current_step = 2  # One question answered
-    else:
-        current_step = 1  # No questions answered yet
-
-    # Process user input
-    user_input = None
-    if dtmf and isinstance(dtmf_data, dict) and dtmf_data.get('digits'):
-        user_input = dtmf
-    elif speech_text:
-        speech_text_lower = speech_text.lower()
-        speech_map = {
-            "one": "1", "two": "2",
-            "yes": "1", "no": "2",
-            "iphone": "1", "android": "2",
-            "go": "go"
-        }
-        user_input = speech_map.get(speech_text_lower, speech_text_lower)
-
-    logger.info(f"User input: {user_input}, Current step: {current_step}")
-
-    # Handle step progression
-    next_step = current_step
-
-    if user_input == "go" and current_step == 1:
-        next_step = 1
-    elif user_input and user_input != "go":
-        if current_step == 1:
-            responses['device_type'] = user_input
-            if hasattr(call_tracker, 'record_survey_response'):
-                call_tracker.record_survey_response(conversation_uuid, "device_type", user_input)
-            next_step = 2
-        elif current_step == 2:
-            responses['saw_vonage_logo'] = user_input
-            if hasattr(call_tracker, 'record_survey_response'):
-                call_tracker.record_survey_response(conversation_uuid, "saw_vonage_logo", user_input)
-            next_step = 3
-        elif current_step == 3:
-            responses['saw_vonage_caller_id'] = user_input
-            if hasattr(call_tracker, 'record_survey_response'):
-                call_tracker.record_survey_response(conversation_uuid, "saw_vonage_caller_id", user_input)
-            next_step = 4
-
-    logger.info(f"Next step: {next_step}")
-
-    # Generate NCCO based on next step
-    if next_step == 1:
-        ncco = [
-            {
-                'action': 'talk',
-                'text': '<speak>What type of device do you have? You can either say, "iPhone", or press or say 1; you can say "Android", or press or say 2.</speak>',
-                'language': 'en-US',
-                'style': 2,
-                'premium': True,
-                'bargeIn': True
-            },
-            {
-                'action': 'input',
-                'dtmf': {'maxDigits': 1, 'timeOut': 10},
-                'speech': {
-                    'language': 'en-US',
-                    'context': ['1', '2', 'iphone', 'android'],
-                    'startTimeout': 10,
-                    'maxDuration': 5,
-                    'endOnSilence': 0.4
-                },
-                'type': ['dtmf', 'speech'],
-                'eventUrl': [get_webhook_url('dtmf_input')],
-                'eventMethod': 'POST'
-            }
-        ]
-    elif next_step == 2:
-        ncco = [
-            {
-                'action': 'talk',
-                'text': '<speak>Did you see the Vonage Logo on your handset when I called you? Press or say 1 for yes, press or say 2 for no.</speak>',
-                'language': 'en-US',
-                'style': 2,
-                'premium': True,
-                'bargeIn': True
-            },
-            {
-                'action': 'input',
-                'dtmf': {'maxDigits': 1, 'timeOut': 10},
-                'speech': {
-                    'language': 'en-US',
-                    'context': ['1', '2', 'yes', 'no'],
-                    'startTimeout': 10,
-                    'maxDuration': 5,
-                    'endOnSilence': 1.5
-                },
-                'type': ['dtmf', 'speech'],
-                'eventUrl': [get_webhook_url('dtmf_input')],
-                'eventMethod': 'POST'
-            }
-        ]
-    elif next_step == 3:
-        ncco = [
-            {
-                'action': 'talk',
-                'text': '<speak>Did you see the Vonage caller name on your handset when I called you? Press or say 1 for yes, press or say 2 for no.</speak>',
-                'language': 'en-US',
-                'style': 2,
-                'premium': True,
-                'bargeIn': True
-            },
-            {
-                'action': 'input',
-                'dtmf': {'maxDigits': 1, 'timeOut': 10},
-                'speech': {
-                    'language': 'en-US',
-                    'context': ['1', '2', 'yes', 'no'],
-                    'startTimeout': 10,
-                    'maxDuration': 5,
-                    'endOnSilence': 1.5
-                },
-                'type': ['dtmf', 'speech'],
-                'eventUrl': [get_webhook_url('dtmf_input')],
-                'eventMethod': 'POST'
-            }
-        ]
-    elif next_step == 4:
-        logger.info(f"Survey completed for conversation {conversation_uuid}")
-        ncco = [
-            {
-                'action': 'talk',
-                'text': '<speak>Thank you for your responses. Tim Dentry thanks you for your input. Goodbye!</speak>',
-                'language': 'en-US',
-                'style': 2,
-                'premium': True
-            }
-        ]
-
-    return JSONResponse(content=ncco, status_code=200)
-
-
-@app.post("/recording")
-async def recording_webhook(request: Request):
-    """
-    Handle recording completion notifications
-    Note: Recording download is optional for demo purposes
-    """
-    data = await request.json()
-    recording_url = data.get('recording_url')
-    conversation_uuid = data.get('conversation_uuid', 'unknown')
-
-    logger.info(f"Recording available for conversation {conversation_uuid}")
-    logger.info(f"Recording URL: {recording_url}")
-
-    # For demo purposes, we're just logging the URL
-    # In production, you might want to download and store these
-
-    return JSONResponse(content={'status': 'success'}, status_code=200)
-
 
 # ============================================================================
 # APPLICATION STARTUP
