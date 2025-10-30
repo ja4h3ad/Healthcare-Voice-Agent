@@ -1,0 +1,18 @@
+project:
+    name: pstn-branded-calling
+instance:
+    name: dev
+    runtime: python3
+    region: aws.use1
+    application-id: 741f45bb-4aa3-41d0-b219-cc1c122113c8
+    entrypoint:  [ python3, app/main.py ]
+    build-script: ./build.sh
+    environment:
+        - name: MONGO_URL
+          value: "mongodb://user-3ecb6a35-JebF-IsV8H9Lu1e0x3WoJ:w4DNFEtGfwmseYxW@mongo.use1-1.runtime.vonage.cloud:27017/db-3ecb6a35-A58MTBmDNnyWsCjNTkgTc?authSource=admin&tls=true&directConnection=true"
+        - name: MONGO_DB_NAME
+          value: "db-3ecb6a35-A58MTBmDNnyWsCjNTkgTc"
+debug:
+    name: debug
+    application-id: 5341dc11-41f2-409a-929d-b028dd8f3afc
+    entrypoint: [ python3, -m, debugpy, --listen, 'localhost:9229', app/main.py ]

@@ -1,0 +1,7 @@
+vonage~=4.0
+fastapi
+uvicorn[standard]==0.32.0
+python-dotenv==1.0.1
+pydantic
+requests==2.32.0
+vonage_cloud_runtime
