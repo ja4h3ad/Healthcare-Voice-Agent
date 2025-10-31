@@ -7,9 +7,12 @@ Handles outbound call initiation
 import logging
 from typing import Optional
 from vonage import Vonage, Auth
-from vonage_voice import CreateCallRequest
+from vonage_voice import CreateCallRequest, Phone, ToPhone
 from vonage_http_client import AuthenticationError, HttpRequestError
+from dotenv import load_dotenv
 import os
+load_dotenv()
+
 from urllib.parse import urljoin
 
 from app.branded_calling.first_orion import get_auth_token, send_push_notification
@@ -21,6 +24,7 @@ logger = logging.getLogger(__name__)
 VONAGE_APPLICATION_ID = os.environ.get("VCR_API_APPLICATION_ID")
 VONAGE_PRIVATE_KEY = os.environ.get("VONAGE_APPLICATION_PRIVATE_KEY")
 VONAGE_NUMBER = os.environ.get("VONAGE_NUMBER")
+logger.info(f"Loaded Vonage Number {VONAGE_NUMBER}")
 WEBHOOK_BASE_URL = os.environ.get("VCR_INSTANCE_PUBLIC_URL") or os.environ.get("WEBHOOK_BASE_URL")
 
 # Initialize Vonage client
@@ -40,7 +44,7 @@ def get_webhook_url(endpoint: str) -> str:
     return urljoin(WEBHOOK_BASE_URL, endpoint)
 
 
-def make_call(to_number: str, max_retries: int = 3, initial_delay: int = 1) -> Optional[str]:
+def make_call(to_number: str, correlation_id: str) -> Optional[str]:
     """
     Initiate branded outbound call with WebSocket connection to Deepgram Flux
 
@@ -51,9 +55,8 @@ def make_call(to_number: str, max_retries: int = 3, initial_delay: int = 1) -> O
     Returns:
         Call UUID if successful, None otherwise
     """
-
-    correlation_id = call_tracker.start_auth_flow(to_number)
     logger.info(f"Initiating call to {to_number} with correlation_id {correlation_id}")
+
 
     # First Orion branded calling
     token, auth_data = get_auth_token(correlation_id)
@@ -74,22 +77,28 @@ def make_call(to_number: str, max_retries: int = 3, initial_delay: int = 1) -> O
 
     # Create the call with WebSocket connection to Flux AI
     try:
-        call_request = CreateCallRequest(
-            to=[{'type': 'phone', 'number': to_number}],
-            from_={'type': 'phone', 'number': VONAGE_NUMBER},
-            ringing_timer=60,
-            ncco=[
-                {
-                    'action': 'connect',
-                    'endpoint': [
-                        {
-                            'type': 'websocket',
-                            'uri': get_webhook_url(f'ws/voice/{correlation_id}'),
-                            'content-type': 'audio/l16;rate=16000'
+        ncco = [
+            {
+                "action": "connect",
+                "endpoint": [
+                    {
+                        "type": "websocket",
+                        "uri": get_webhook_url(f'ws/voice/{correlation_id}'),
+                        "content-type": "audio/l16;rate=16000",
+                        'headers': {
+                            'source': 'flux'
                         }
-                    ]
-                }
-            ],
+
+                    }
+                ]
+            }
+        ]
+
+        call_request = CreateCallRequest(
+            ncco=ncco,
+            to=[ToPhone(number=to_number)],  # Use ToPhone class
+            from_=Phone(number=VONAGE_NUMBER),  # Use Phone class
+            ringing_timer=60,
             event_url=[get_webhook_url('webhooks/voice/event')],
             event_method='POST'
         )

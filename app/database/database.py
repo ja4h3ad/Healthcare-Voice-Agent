@@ -80,15 +80,15 @@ class Database:
         return str(doctor_data['_id'])  # Ensure the doctorID is always a string
 
     async def insert_aesthetician(self, doctor_data):
-        aestheticians = self.db.aestheticians
+        physicians_assistants = self.db.physicians_assistants
         # Similar logic as for doctors
-        existing_aesthetician = await aestheticians.find_one({"firstName": doctor_data["firstName"], "lastName": doctor_data["lastName"]})
+        existing_aesthetician = await physicians_assistants.find_one({"firstName": doctor_data["firstName"], "lastName": doctor_data["lastName"]})
         if not existing_aesthetician:
             doctor_data['_id'] = str(ObjectId())
         else:
             doctor_data['_id'] = str(existing_aesthetician['_id'])
 
-        result = await aestheticians.update_one(
+        result = await physicians_assistants.update_one(
             {"firstName": doctor_data["firstName"], "lastName": doctor_data["lastName"]},
             {"$set": doctor_data},
             upsert=True
@@ -188,11 +188,11 @@ class Database:
             doctor['_id'] = str(doctor['_id'])  # Ensure _id is always a string
         return doctor
 
-    async def find_doctor_from_aestheticians(self, doctor_id=None):
+    async def find_doctor_from_physicians_assistants(self, doctor_id=None):
         if not doctor_id:
             return None
         query = {'$or': [{'_id': doctor_id}, {'_id': ObjectId(doctor_id)}]}
-        aesthetician = await self.db.aestheticians.find_one(query)
+        aesthetician = await self.db.physicians_assistants.find_one(query)
         if aesthetician:
             aesthetician['_id'] = str(aesthetician['_id'])  # Ensure _id is always a string
         return aesthetician
@@ -202,8 +202,8 @@ class Database:
         provider = await self.find_doctor_from_physicians(doctor_id)
 
         if not provider:
-            # If not found in physicians, try the aestheticians collection
-            provider = await self.find_doctor_from_aestheticians(doctor_id)
+            # If not found in physicians, try the physicians_assistants collection
+            provider = await self.find_doctor_from_physicians_assistants(doctor_id)
 
         if provider:
             return {
@@ -253,7 +253,7 @@ class Database:
         if appointment_route.lower() == 'physician':
             collection = self.db.physicians
         elif appointment_route.lower() == 'aesthetician':
-            collection = self.db.aestheticians
+            collection = self.db.physicians_assistants
         else:
             raise ValueError("Invalid appointment route")
 

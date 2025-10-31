@@ -89,6 +89,40 @@ def get_webhook_url(endpoint):
     return urljoin(WEBHOOK_BASE_URL, endpoint)
 
 
+# ============================================================================
+# Websocket Test - temporary
+# ============================================================================
+
+@app.post("/test/setup-call/{call_id}")
+async def setup_test_call(call_id: str, phone_number: str):
+    """
+    Setup a test call context without actually making a Vonage call
+    For testing WebSocket + Deepgram integration
+    """
+    from app.services.appointment_agent import AppointmentAgent
+    from app.webhooks.websocket_events import call_contexts
+
+    # Gather context
+    context = await AppointmentAgent.get_call_context(phone_number)
+
+    if not context['success']:
+        return JSONResponse(content={
+            "status": "error",
+            "message": context.get('error')
+        }, status_code=404)
+
+    # Store context
+    call_contexts[call_id] = context
+
+    return JSONResponse(content={
+        "status": "success",
+        "message": f"Test call context created for {call_id}",
+        "context": {
+            "patient_name": context.get('patient_name'),
+            "appointments": len(context.get('appointments', []))
+        }
+    })
+
 
 
 # ============================================================================

@@ -16,7 +16,7 @@ load_dotenv()
 
 logger = logging.getLogger(__name__)
 
-DEEPGRAM_API_KEY = os.environ.get("DEEPGRAM_API_KEY")
+DEEPGRAM_API_KEY = os.environ.get("DEEPGRAM_PASSWORD")
 # Voice Agent API endpoint (check Deepgram docs for latest)
 DEEPGRAM_AGENT_URL = "wss://agent.deepgram.com/agent"
 
