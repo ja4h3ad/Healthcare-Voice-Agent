@@ -12,7 +12,7 @@ import time
 import logging
 import os
 from dotenv import load_dotenv
-from call_tracker import call_tracker
+from app.telemetry.call_tracker import call_tracker
 
 # Load environment variables from .env file
 load_dotenv()

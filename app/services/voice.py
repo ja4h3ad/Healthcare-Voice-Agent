@@ -40,7 +40,7 @@ def get_webhook_url(endpoint: str) -> str:
     return urljoin(WEBHOOK_BASE_URL, endpoint)
 
 
-def make_call(to_number: str, correlation_id: str) -> Optional[str]:
+def make_call(to_number: str, max_retries: int = 3, initial_delay: int = 1) -> Optional[str]:
     """
     Initiate branded outbound call with WebSocket connection to Deepgram Flux
 
@@ -51,6 +51,8 @@ def make_call(to_number: str, correlation_id: str) -> Optional[str]:
     Returns:
         Call UUID if successful, None otherwise
     """
+
+    correlation_id = call_tracker.start_auth_flow(to_number)
     logger.info(f"Initiating call to {to_number} with correlation_id {correlation_id}")
 
     # First Orion branded calling

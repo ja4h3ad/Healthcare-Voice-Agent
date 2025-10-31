@@ -7,25 +7,23 @@ Handles:
 - WebSocket audio streaming for ASR and TTS
 """
 
-from vonage import Vonage, Auth
-from vonage_voice import CreateCallRequest
-from vonage_http_client import AuthenticationError, HttpRequestError
-from app.webhooks.websocket_events import handle_voice_websocket, call_contexts
-from app.services.appointment_agent import AppointmentReminderAgent
-from app.services.voice import make_call
-from dotenv import load_dotenv
+import os
+from urllib.parse import urljoin
+import logging
 
 # FastAPI and pydantic
 from fastapi import FastAPI, Request, WebSocket, Depends
 from fastapi.responses import JSONResponse
 import uvicorn
 from typing import Optional, Dict, Any
+from dotenv import load_dotenv
 
-import os
-from urllib.parse import urljoin
-import logging
+from vonage import Vonage, Auth
 
 # Import custom modules
+from app.webhooks.websocket_events import handle_voice_websocket, call_contexts
+from app.services.appointment_agent import AppointmentAgent
+from app.services.voice import make_call
 from app.branded_calling.first_orion import get_auth_token, send_push_notification
 from app.telemetry.call_tracker import call_tracker
 from app.models.events.sms_events import InboundSMSEvent
@@ -118,30 +116,49 @@ async def websocket_endpoint(websocket: WebSocket, call_id: str):
     """
     await handle_voice_websocket(websocket, call_id)
 
+
+
 @app.post("/webhooks/sms/inbound")
 async def inbound_sms(sms: InboundSMSEvent):
     """
-    Handle inbound SMS and trigger outbound branded call
-    Uses Pydantic model for validation
+    Handle inbound SMS and trigger outbound appointment reminder call
     """
     from_number = sms.from_
 
     logger.info(f"Received inbound SMS from: {from_number}")
     logger.info(f"Message text: {sms.text}")
 
-    call_uuid = make_call(from_number)
+    # Gather context for the call
+    context = await AppointmentAgent.get_call_context(from_number)
+
+    if not context['success']:
+        return JSONResponse(content={
+            "status": "error",
+            "message": context.get('error', 'Failed to gather patient info')
+        }, status_code=404)
+
+    # Generate unique call ID (correlation_id)
+    correlation_id = call_tracker.start_auth_flow(from_number)
+
+    # Store context for WebSocket handler (keyed by correlation_id, not phone number)
+    call_contexts[correlation_id] = context
+
+    # Initiate the call with proper signature
+    call_uuid = make_call(from_number, correlation_id)
 
     if call_uuid:
         return JSONResponse(content={
             "status": "success",
-            "message": f"Call initiated to {from_number}",
-            "call_uuid": call_uuid
+            "message": f"Appointment reminder call initiated to {from_number}",
+            "call_uuid": call_uuid,
+            "correlation_id": correlation_id
         })
 
     return JSONResponse(content={
         "status": "error",
         "message": "Failed to initiate call"
     }, status_code=500)
+
 
 
 @app.post("/webhooks/voice/event")

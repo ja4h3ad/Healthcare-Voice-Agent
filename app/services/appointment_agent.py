@@ -1,148 +1,230 @@
-# app/services/appointment_agent.py
+# app/services/appointment_agent.py (UPDATED)
 """
-Orchestrates the appointment reminder flow
+Appointment agent with FHIR function calling
 """
 
 import json
 import logging
+from typing import Dict, Any
 from datetime import datetime
-from typing import Dict, Any, Optional
 
-from app.mcp.tools.patient_tools import get_patient_by_phone_tool
+from app.mcp.tools.patient_tools import get_patient_by_phone_tool, get_patient_by_id_tool
 from app.mcp.tools.appointment_tools import (
     get_upcoming_appointments_tool,
+    get_appointment_by_id_tool,
     update_appointment_tool
 )
 
 logger = logging.getLogger(__name__)
 
 
-class AppointmentReminderAgent:
+class AppointmentAgent:
     """
-    Agent that handles appointment reminder conversations
-    Integrates LLM with MCP tools
+    Handles appointment self-service with FHIR-like interface
     """
 
-    def __init__(self):
-        self.conversation_state = {}
+    @staticmethod
+    def build_system_prompt(patient_name: str, appointments: list) -> str:
+        """Build system prompt based on patient context"""
+        if not appointments:
+            return f"""You are a friendly medical office assistant calling {patient_name}.
 
-    async def handle_sms_trigger(self, phone_number: str) -> Dict[str, Any]:
+Unfortunately, we don't have any upcoming appointments on file for you. 
+
+Ask if they would like to schedule an appointment, and let them know they can call our office at 555-0100 to book one.
+
+Keep the conversation brief and professional."""
+
+        # Get the next appointment (first entry in FHIR Bundle)
+        next_appt = appointments[0]
+        appt_datetime = next_appt.get('start')
+        appt_type = next_appt.get('appointmentType', {}).get('coding', [{}])[0].get('display', 'appointment')
+        participants = next_appt.get('participant', [])
+        provider_name = "Unknown Provider"
+
+        for participant in participants:
+            if 'Practitioner' in participant.get('actor', {}).get('reference', ''):
+                provider_name = participant.get('actor', {}).get('display', 'Unknown Provider')
+
+        appointment_id = next_appt.get('id')
+
+        return f"""You are a friendly medical office assistant calling {patient_name}.
+
+You are calling to remind them about their upcoming appointment:
+- Date/Time: {appt_datetime}
+- Type: {appt_type}
+- Provider: {provider_name}
+- Appointment ID: {appointment_id}
+
+Your conversation flow:
+1. Greet the patient warmly
+2. Remind them about the appointment details
+3. Ask if they can still make it
+4. If YES: Use confirm_appointment function
+5. If NO: Ask if they want to reschedule or cancel, then use appropriate function
+
+Keep responses conversational and brief - this is a phone call."""
+
+    @staticmethod
+    def get_function_definitions() -> list:
         """
-        Called when SMS is received
-        Gathers patient/appointment info before call is made
-
-        Returns context for the LLM to use during the call
+        Define FHIR-like functions for the AI
         """
-        logger.info(f"Gathering appointment info for {phone_number}")
+        return [
+            {
+                "name": "confirm_appointment",
+                "description": "Mark appointment as confirmed (FHIR status: booked)",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "appointment_id": {
+                            "type": "string",
+                            "description": "The FHIR Appointment ID"
+                        }
+                    },
+                    "required": ["appointment_id"]
+                }
+            },
+            {
+                "name": "cancel_appointment",
+                "description": "Cancel the appointment (FHIR status: cancelled)",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "appointment_id": {
+                            "type": "string",
+                            "description": "The FHIR Appointment ID"
+                        },
+                        "reason": {
+                            "type": "string",
+                            "description": "Reason for cancellation"
+                        }
+                    },
+                    "required": ["appointment_id"]
+                }
+            },
+            {
+                "name": "request_reschedule",
+                "description": "Patient wants to reschedule (will be contacted by office)",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "appointment_id": {
+                            "type": "string",
+                            "description": "The FHIR Appointment ID"
+                        },
+                        "preferred_time": {
+                            "type": "string",
+                            "description": "Patient's preferred time if mentioned"
+                        }
+                    },
+                    "required": ["appointment_id"]
+                }
+            }
+        ]
 
-        # Use MCP tool directly (no server needed)
-        patient_data_json = await get_patient_by_phone_tool(phone_number)
-        patient_data = json.loads(patient_data_json)
+    @staticmethod
+    async def execute_function(function_name: str, arguments: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Execute FHIR-like function calls
+        """
+        logger.info(f"Executing function: {function_name} with args: {arguments}")
 
-        if patient_data['status'] != 'success':
+        try:
+            if function_name == "confirm_appointment":
+                # Update status to 'booked' (FHIR) which maps to 'confirmed' (MongoDB)
+                result_json = await update_appointment_tool(
+                    appointment_id=arguments['appointment_id'],
+                    update_data={'status': 'booked'}  # FHIR status
+                )
+                return json.loads(result_json)
+
+            elif function_name == "cancel_appointment":
+                reason = arguments.get('reason', 'Patient requested cancellation via phone')
+                result_json = await update_appointment_tool(
+                    appointment_id=arguments['appointment_id'],
+                    update_data={
+                        'status': 'cancelled',  # FHIR status
+                        'reason': reason
+                    }
+                )
+                return json.loads(result_json)
+
+            elif function_name == "request_reschedule":
+                # Mark as pending and log request
+                return {
+                    "resourceType": "OperationOutcome",
+                    "issue": [{
+                        "severity": "information",
+                        "code": "informational",
+                        "diagnostics": "Reschedule request noted. Office will call back to schedule."
+                    }]
+                }
+
+            else:
+                return {
+                    "resourceType": "OperationOutcome",
+                    "issue": [{
+                        "severity": "error",
+                        "code": "not-supported",
+                        "diagnostics": f"Unknown function: {function_name}"
+                    }]
+                }
+
+        except Exception as e:
+            logger.error(f"Error executing function: {str(e)}")
             return {
-                'success': False,
-                'error': 'Patient not found'
+                "resourceType": "OperationOutcome",
+                "issue": [{
+                    "severity": "error",
+                    "code": "exception",
+                    "diagnostics": str(e)
+                }]
             }
 
-        patient = patient_data['patient']
-        patient_id = patient['_id']
-        patient_name = f"{patient['firstName']} {patient['lastName']}"
+    @staticmethod
+    async def get_call_context(phone_number: str) -> Dict[str, Any]:
+        """
+        Gather patient and appointment context using FHIR-like calls
+        """
+        logger.info(f"Gathering FHIR context for {phone_number}")
 
-        # Get upcoming appointments using MCP tool
+        # Get patient (FHIR Patient resource)
+        patient_json = await get_patient_by_phone_tool(phone_number)
+        patient_resource = json.loads(patient_json)
+
+        if patient_resource.get('resourceType') == 'OperationOutcome':
+            return {
+                'success': False,
+                'error': patient_resource['issue'][0]['diagnostics']
+            }
+
+        patient_id = patient_resource['id']
+        patient_name = patient_resource['name'][0]
+        full_name = f"{patient_name['given'][0]} {patient_name['family']}"
+
+        # Get upcoming appointments (FHIR Bundle)
         appointments_json = await get_upcoming_appointments_tool(
             patient_id=patient_id,
             days_ahead=30
         )
-        appointments_data = json.loads(appointments_json)
+        bundle = json.loads(appointments_json)
 
-        upcoming_appointments = appointments_data.get('appointments', [])
+        # Extract appointments from bundle
+        appointments = []
+        if bundle.get('resourceType') == 'Bundle':
+            appointments = [entry['resource'] for entry in bundle.get('entry', [])]
 
-        # Build context for LLM
-        context = {
+        # Build system prompt
+        system_prompt = AppointmentAgent.build_system_prompt(full_name, appointments)
+
+        return {
             'success': True,
             'phone_number': phone_number,
             'patient_id': patient_id,
-            'patient_name': patient_name,
-            'patient_info': patient,
-            'upcoming_appointments': upcoming_appointments,
-            'system_prompt': self._build_system_prompt(patient_name, upcoming_appointments)
+            'patient_name': full_name,
+            'patient_resource': patient_resource,  # Full FHIR Patient
+            'appointments': appointments,  # List of FHIR Appointments
+            'system_prompt': system_prompt,
+            'functions': AppointmentAgent.get_function_definitions()
         }
-
-        return context
-
-    def _build_system_prompt(self, patient_name: str, appointments: list) -> str:
-        """
-        Build the system prompt for the LLM based on patient context
-        """
-        if not appointments:
-            return f"""You are a helpful medical office assistant calling {patient_name}.
-
-Unfortunately, we don't see any upcoming appointments scheduled for you. 
-Would you like to schedule an appointment?"""
-
-        # Format appointment info
-        next_appt = appointments[0]
-        appt_datetime = next_appt.get('appointmentDateTime')
-        appt_type = next_appt.get('appointmentType', 'appointment')
-        provider_info = next_appt.get('providerInfo', {})
-        provider_name = f"Dr. {provider_info.get('lastName', 'Unknown')}"
-
-        return f"""You are a helpful medical office assistant calling {patient_name}.
-
-You are calling to remind them about their upcoming {appt_type} appointment.
-
-Appointment Details:
-- Date/Time: {appt_datetime}
-- Provider: {provider_name}
-- Type: {appt_type}
-
-Your goal:
-1. Confirm they received the reminder
-2. Ask if they can keep the appointment
-3. If they want to reschedule or cancel, gather their preference
-
-Available actions you can take:
-- confirm_appointment: Patient confirms they will attend
-- request_reschedule: Patient wants to change the date/time
-- request_cancellation: Patient wants to cancel
-
-Be warm, professional, and helpful. Keep responses concise since this is a voice call."""
-
-    async def handle_tool_call(self, tool_name: str, tool_args: Dict[str, Any]) -> str:
-        """
-        Handle tool calls from the LLM during conversation
-        This is called when Deepgram Flux invokes a function
-        """
-        logger.info(f"LLM requested tool: {tool_name} with args: {tool_args}")
-
-        if tool_name == "confirm_appointment":
-            # Mark appointment as confirmed
-            appointment_id = tool_args.get('appointment_id')
-            result = await update_appointment_tool(
-                appointment_id=appointment_id,
-                update_data={'status': 'confirmed'}
-            )
-            return result
-
-        elif tool_name == "request_reschedule":
-            # Initiate reschedule flow
-            return json.dumps({
-                "status": "reschedule_requested",
-                "message": "I'd be happy to help you reschedule. What date and time works better for you?"
-            })
-
-        elif tool_name == "request_cancellation":
-            appointment_id = tool_args.get('appointment_id')
-            reason = tool_args.get('reason', 'Patient requested cancellation')
-            result = await update_appointment_tool(
-                appointment_id=appointment_id,
-                update_data={
-                    'status': 'cancelled',
-                    'reason': reason
-                }
-            )
-            return result
-
-        else:
-            return json.dumps({"error": f"Unknown tool: {tool_name}"})

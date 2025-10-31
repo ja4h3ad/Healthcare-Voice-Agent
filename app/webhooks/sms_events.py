@@ -8,13 +8,13 @@ from fastapi.responses import JSONResponse
 import logging
 
 from app.models.events.sms_events import InboundSMSEvent
-from app.services.appointment_reminder import AppointmentReminderAgent
+from app.services.appointment_agent import AppointmentAgent
 from app.services.voice import make_call
 
 logger = logging.getLogger(__name__)
 
 # Initialize agent
-reminder_agent = AppointmentReminderAgent()
+reminder_agent = AppointmentAgent()
 
 
 async def handle_inbound_sms(sms: InboundSMSEvent) -> JSONResponse:

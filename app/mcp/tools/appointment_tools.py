@@ -1,6 +1,6 @@
 # app/mcp/tools/appointment_tools.py
 """
-Appointment management tools matching MongoDB schema
+Appointment tools that return FHIR-like responses
 """
 
 import json
@@ -11,163 +11,175 @@ import pytz
 from bson import ObjectId
 
 from app.database.database import Database
+from app.mcp.schemas import (
+    appointment_to_fhir,
+    appointments_to_fhir_bundle,
+    fhir_status_to_mongo
+)
 
 logger = logging.getLogger(__name__)
 
 
-# app/mcp/tools/appointment_tools.py
-
 async def get_upcoming_appointments_tool(patient_id: str, days_ahead: int = 30) -> str:
     """
     Get upcoming appointments for a patient
+    Returns FHIR R4 Bundle (searchset)
+
+    Args:
+        patient_id: Patient's ID
+        days_ahead: Number of days to look ahead
+
+    Returns:
+        JSON string of FHIR Bundle or OperationOutcome
     """
     try:
         db = Database()
         await db.connect()
 
-        # Use the new method to get patient by ID
+        # Get patient to retrieve account info
         patient = await db.get_patient_by_id(patient_id)
 
         if not patient:
             await db.disconnect()
             return json.dumps({
-                "status": "not_found",
-                "message": f"No patient found with ID: {patient_id}"
+                "resourceType": "OperationOutcome",
+                "issue": [{
+                    "severity": "error",
+                    "code": "not-found",
+                    "diagnostics": f"No patient found with ID: {patient_id}"
+                }]
             }, indent=2)
 
-        # Now use get_patient_info with account_number or mobile_number
+        # Get appointments
         patient_info, appointments = await db.get_patient_info(
-            account_number=patient.get('accountNumber'),
-            mobile_number=patient.get('mobileNumber')
+            account_number=patient.get('accountNumber')
         )
 
         if not appointments:
             await db.disconnect()
+            # Return empty bundle
             return json.dumps({
-                "status": "success",
-                "count": 0,
-                "appointments": []
+                "resourceType": "Bundle",
+                "type": "searchset",
+                "total": 0,
+                "entry": []
             }, indent=2)
 
-            # Filter for upcoming appointments within date range
+        # Filter for upcoming appointments
         now = datetime.now(pytz.UTC)
         end_date = now + timedelta(days=days_ahead)
 
-        upcoming_appointments = []
+        upcoming = []
         for appt in appointments:
             appt_datetime = appt.get('appointmentDateTime')
 
-            # Ensure datetime is timezone-aware
             if appt_datetime and not appt_datetime.tzinfo:
                 appt_datetime = appt_datetime.replace(tzinfo=pytz.UTC)
 
-            # Filter: future appointments within range, not cancelled
             if (appt_datetime and
                     appt_datetime >= now and
                     appt_datetime <= end_date and
                     appt.get('status') != 'cancelled'):
 
-                appt['_id'] = str(appt['_id'])
-
-                # Get provider info
+                # Enrich with provider info
                 if appt.get('doctorID'):
                     provider = await db.get_provider_info(appt['doctorID'])
                     appt['providerInfo'] = provider
 
-                upcoming_appointments.append(appt)
+                upcoming.append(appt)
 
-        # Sort by date
-        upcoming_appointments.sort(key=lambda x: x.get('appointmentDateTime', datetime.min))
+        upcoming.sort(key=lambda x: x.get('appointmentDateTime', datetime.min))
 
         await db.disconnect()
 
-        response = {
-            "status": "success",
-            "count": len(upcoming_appointments),
-            "appointments": upcoming_appointments
-        }
-
-        return json.dumps(response, indent=2, default=str)
+        # Convert to FHIR Bundle
+        fhir_bundle = appointments_to_fhir_bundle(upcoming)
+        return json.dumps(fhir_bundle, indent=2, default=str)
 
     except Exception as e:
         logger.error(f"Error getting appointments: {str(e)}", exc_info=True)
         return json.dumps({
-            "status": "error",
-            "message": str(e)
+            "resourceType": "OperationOutcome",
+            "issue": [{
+                "severity": "error",
+                "code": "exception",
+                "diagnostics": str(e)
+            }]
         }, indent=2)
 
 
-async def get_appointment_details_tool(appointment_id: str) -> str:
+async def get_appointment_by_id_tool(appointment_id: str) -> str:
     """
-    Get full details of a specific appointment
+    Get appointment by ID
+    Returns FHIR R4 Appointment resource
 
     Args:
-        appointment_id: Appointment MongoDB _id
+        appointment_id: Appointment ID
 
     Returns:
-        JSON string with appointment details
+        JSON string of FHIR Appointment or OperationOutcome
     """
     try:
         db = Database()
         await db.connect()
 
-        # Use your existing method
         appointment = await db.get_appointment_by_id(appointment_id)
 
         if not appointment:
             await db.disconnect()
             return json.dumps({
-                "status": "not_found",
-                "message": f"No appointment found with ID: {appointment_id}"
+                "resourceType": "OperationOutcome",
+                "issue": [{
+                    "severity": "error",
+                    "code": "not-found",
+                    "diagnostics": f"No appointment found with ID: {appointment_id}"
+                }]
             }, indent=2)
 
-        # Convert ObjectId to string
-        appointment['_id'] = str(appointment['_id'])
-
-        # Get patient info using direct db access
-        patient_info = await db.db.patients.find_one({"_id": ObjectId(appointment['patientID'])})
-        if patient_info:
-            patient_info['_id'] = str(patient_info['_id'])
-            appointment['patientInfo'] = patient_info
-
-        # Get provider info
+        # Enrich with provider info
         if appointment.get('doctorID'):
             provider = await db.get_provider_info(appointment['doctorID'])
             appointment['providerInfo'] = provider
 
         await db.disconnect()
 
-        response = {
-            "status": "success",
-            "appointment": appointment
-        }
-
-        return json.dumps(response, indent=2, default=str)
+        # Convert to FHIR
+        fhir_appointment = appointment_to_fhir(appointment)
+        return json.dumps(fhir_appointment, indent=2, default=str)
 
     except Exception as e:
-        logger.error(f"Error getting appointment details: {str(e)}", exc_info=True)
+        logger.error(f"Error getting appointment: {str(e)}", exc_info=True)
         return json.dumps({
-            "status": "error",
-            "message": str(e)
+            "resourceType": "OperationOutcome",
+            "issue": [{
+                "severity": "error",
+                "code": "exception",
+                "diagnostics": str(e)
+            }]
         }, indent=2)
 
 
 async def update_appointment_tool(appointment_id: str, update_data: dict) -> str:
     """
     Update an appointment
+    Returns FHIR R4 Appointment resource
 
     Args:
         appointment_id: Appointment ID
-        update_data: Dictionary with fields to update
+        update_data: Fields to update (can include FHIR status)
 
     Returns:
-        JSON string with updated appointment
+        JSON string of updated FHIR Appointment or OperationOutcome
     """
     try:
         db = Database()
         await db.connect()
 
-        # Parse datetime if provided as string
+        # Convert FHIR status to MongoDB status if present
+        if 'status' in update_data:
+            update_data['status'] = fhir_status_to_mongo(update_data['status'])
+
+        # Parse datetime if provided
         if 'appointmentDateTime' in update_data and isinstance(update_data['appointmentDateTime'], str):
             try:
                 update_data['appointmentDateTime'] = datetime.strptime(
@@ -175,38 +187,45 @@ async def update_appointment_tool(appointment_id: str, update_data: dict) -> str
                     "%Y-%m-%d %H:%M:%S"
                 ).replace(tzinfo=pytz.UTC)
             except ValueError:
-                # Try ISO format
                 update_data['appointmentDateTime'] = datetime.fromisoformat(
                     update_data['appointmentDateTime'].replace('Z', '+00:00')
                 )
 
-        # Use your existing update method
+        # Update
         success = await db.update_appointment(appointment_id, update_data)
 
         if not success:
             await db.disconnect()
             return json.dumps({
-                "status": "error",
-                "message": f"Failed to update appointment: {appointment_id}"
+                "resourceType": "OperationOutcome",
+                "issue": [{
+                    "severity": "error",
+                    "code": "processing",
+                    "diagnostics": f"Failed to update appointment: {appointment_id}"
+                }]
             }, indent=2)
 
         # Get updated appointment
-        updated_appointment = await db.get_appointment_by_id(appointment_id)
-        updated_appointment['_id'] = str(updated_appointment['_id'])
+        updated = await db.get_appointment_by_id(appointment_id)
+
+        # Enrich with provider info
+        if updated.get('doctorID'):
+            provider = await db.get_provider_info(updated['doctorID'])
+            updated['providerInfo'] = provider
 
         await db.disconnect()
 
-        response = {
-            "status": "success",
-            "message": "Appointment updated successfully",
-            "appointment": updated_appointment
-        }
-
-        return json.dumps(response, indent=2, default=str)
+        # Convert to FHIR
+        fhir_appointment = appointment_to_fhir(updated)
+        return json.dumps(fhir_appointment, indent=2, default=str)
 
     except Exception as e:
         logger.error(f"Error updating appointment: {str(e)}", exc_info=True)
         return json.dumps({
-            "status": "error",
-            "message": str(e)
+            "resourceType": "OperationOutcome",
+            "issue": [{
+                "severity": "error",
+                "code": "exception",
+                "diagnostics": str(e)
+            }]
         }, indent=2)

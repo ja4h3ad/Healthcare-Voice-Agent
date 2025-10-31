@@ -1,11 +1,10 @@
 import pandas as pd
 from motor.motor_asyncio import AsyncIOMotorClient
-from database import Database  # Ensure this is properly imported
-from models import Patient, DoctorBase, AestheticianBase
+from app.database.database import Database  # Ensure this is properly imported
 import asyncio
 
 # Initialize your database
-db = Database()
+db = database()
 asyncio.run(db.connect())  # Make sure to connect asynchronously
 
 async def load_csv_data(file_path, model, collection):
@@ -32,7 +31,7 @@ async def load_csv_data(file_path, model, collection):
 
 # Load data from CSV files
 async def load_data():
-    await load_csv_data('aestheticians.csv', AestheticianBase, 'aestheticians')
+    await load_csv_data('physicians_assistant.csv', AestheticianBase, 'aestheticians')
     await load_csv_data('physicians.csv', DoctorBase, 'physicians')
     await load_csv_data('patients.csv', Patient, 'patients')
 

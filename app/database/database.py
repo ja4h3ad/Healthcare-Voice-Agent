@@ -159,9 +159,17 @@ class Database:
             print(f"Error while fetching data: {e}")
             return None, None
 
+    # Add to app/database/database.py
+
     async def get_patient_by_id(self, patient_id):
         """
         Get patient by MongoDB _id
+
+        Args:
+            patient_id: Patient's _id (string or ObjectId)
+
+        Returns:
+            Patient document or None
         """
         try:
             patient = await self.db.patients.find_one({"_id": ObjectId(patient_id)})
