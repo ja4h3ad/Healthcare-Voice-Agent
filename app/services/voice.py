@@ -13,7 +13,7 @@ from dotenv import load_dotenv
 import os
 load_dotenv()
 
-from urllib.parse import urljoin
+
 
 from app.branded_calling.first_orion import get_auth_token, send_push_notification
 from app.telemetry.call_tracker import call_tracker
@@ -27,6 +27,7 @@ VONAGE_NUMBER = os.environ.get("VONAGE_NUMBER")
 logger.info(f"Loaded Vonage Number {VONAGE_NUMBER}")
 WEBHOOK_BASE_URL = os.environ.get("VCR_INSTANCE_PUBLIC_URL") or os.environ.get("WEBHOOK_BASE_URL")
 
+
 # Initialize Vonage client
 if VONAGE_PRIVATE_KEY:
     if os.path.isfile(VONAGE_PRIVATE_KEY):
@@ -39,10 +40,20 @@ else:
 vonage = Vonage(auth)
 
 
+# app/services/voice.py
+
 def get_webhook_url(endpoint: str) -> str:
     """Construct full webhook URL"""
-    return urljoin(WEBHOOK_BASE_URL, endpoint)
+    base_url = WEBHOOK_BASE_URL.rstrip('/')
+    endpoint = endpoint.lstrip('/')  # Strip leading slash
 
+    # For WebSocket endpoints, convert https:// to wss://
+    if endpoint.startswith('ws/'):
+        base_url = base_url.replace('https://', 'wss://').replace('http://', 'ws://')
+
+    full_url = f"{base_url}/{endpoint}"
+    logger.debug(f"Webhook URL: {full_url}")
+    return full_url
 
 def make_call(to_number: str, correlation_id: str) -> Optional[str]:
     """
@@ -80,6 +91,7 @@ def make_call(to_number: str, correlation_id: str) -> Optional[str]:
         ncco = [
             {
                 "action": "connect",
+                "from_": VONAGE_NUMBER,
                 "endpoint": [
                     {
                         "type": "websocket",

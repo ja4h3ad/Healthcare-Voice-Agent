@@ -8,63 +8,73 @@ import asyncio
 import json
 import logging
 import websockets
-from typing import Optional, Dict, Any, AsyncIterator, Callable
+from typing import Optional, Dict, Any, AsyncIterator, Callable, List
 import os
 from dotenv import load_dotenv
 
 load_dotenv()
-
 logger = logging.getLogger(__name__)
 
 DEEPGRAM_API_KEY = os.environ.get("DEEPGRAM_PASSWORD")
-# Voice Agent API endpoint (check Deepgram docs for latest)
-DEEPGRAM_AGENT_URL = "wss://agent.deepgram.com/agent"
+DEEPGRAM_AGENT_URL = "wss://agent.deepgram.com/v1/agent/converse"
 
 
 class DeepgramVoiceAgent:
     """
-    Client for Deepgram Voice Agent API
-    Handles full conversational flow: STT + LLM + TTS
+    Async client for Deepgram Voice Agent API (STT + LLM + TTS)
+    Manages full duplex audio and event flow.
     """
 
     def __init__(
-            self,
-            system_prompt: str,
-            functions: list,
-            function_handler: Callable,
-            voice: str = "aura-asteria-en"
+        self,
+        system_prompt: str,
+        functions: List[Dict[str, Any]],
+        function_handler: Callable[[str, Dict[str, Any]], Any],
+        greeting: "Hello, this is Doctor Preston's Office calling.  '",
+        voice_model: str = "aura-2-thalia-en",
+        llm_model: str = "claude-3-sonnet-20250514",
     ):
         """
         Initialize Voice Agent
 
         Args:
-            system_prompt: Instructions for the AI
-            functions: List of function definitions
-            function_handler: Async function to execute when agent calls a function
-            voice: Deepgram TTS voice model
+            system_prompt: Base system prompt or persona for the agent.
+            functions: List of function definitions (name, description, parameters).
+            function_handler: Async function to execute when the agent calls a function.
+            greeting: Optional greeting for the agent to start with.
+            voice_model: Deepgram TTS voice model.
+            llm_model: LLM model used by the 'think' provider.
         """
         self.system_prompt = system_prompt
         self.functions = functions
         self.function_handler = function_handler
-        self.voice = voice
+        self.greeting = greeting
+        self.voice_model = voice_model
+        self.llm_model = llm_model
         self.websocket: Optional[websockets.WebSocketClientProtocol] = None
         self.is_connected = False
 
-    async def connect(self):
-        """
-        Establish WebSocket connection to Deepgram Voice Agent
-        """
-        try:
-            # Build connection URL with API key
-            url = f"{DEEPGRAM_AGENT_URL}?token={DEEPGRAM_API_KEY}"
+    # --------------------------------------------------------------------------
+    # Connection Lifecycle
+    # --------------------------------------------------------------------------
 
-            self.websocket = await websockets.connect(url)
+
+
+    async def connect(self):
+        """Establish WebSocket connection to Deepgram Voice Agent."""
+        try:
+            headers = {"Authorization": f"Token {DEEPGRAM_API_KEY}"}
+            self.websocket = await websockets.connect(
+                DEEPGRAM_AGENT_URL,
+                extra_headers=headers,
+            )
             self.is_connected = True
             logger.info("Connected to Deepgram Voice Agent")
 
-            # Send configuration for Voice Agent API
+            # app/services/deepgram_flux.py
+
             config = {
-                "type": "SettingsConfiguration",
+                "type": "Settings",
                 "audio": {
                     "input": {
                         "encoding": "linear16",
@@ -73,62 +83,82 @@ class DeepgramVoiceAgent:
                     "output": {
                         "encoding": "linear16",
                         "sample_rate": 16000,
-                        "container": "none"  # Raw audio
+                        "container": "none"
                     }
                 },
                 "agent": {
                     "listen": {
-                        "model": "nova-2"  # Deepgram STT model
+                        "provider": {
+                            "type": "deepgram",
+                            "model": "nova-2"
+                        }
                     },
                     "think": {
                         "provider": {
-                            "type": "anthropic"
+                            "type": "anthropic",
+                            "model": self.llm_model
                         },
-                        "model": "claude-3-5-sonnet-20241022",
-                        "instructions": self.system_prompt,
-                        "functions": self.functions
+                        "prompt": self.system_prompt,
+                        "functions": self._format_functions()
                     },
                     "speak": {
-                        "model": self.voice
-                    }
+                        "provider": {
+                            "type": "deepgram",
+                            "model": self.voice_model
+                        }
+                    },
+                    "greeting": "Hello! This is your medical office calling."  #
                 }
             }
+            if self.greeting:
+                config["agent"]["greeting"] = self.greeting
 
+            logger.info(f"Sending config with {len(self.functions)} functions")
             await self.websocket.send(json.dumps(config))
-            logger.info("Voice Agent configured")
+            logger.info(f"Voice Agent configured with LLM={self.llm_model}, Voice={self.voice_model}")
 
         except Exception as e:
-            logger.error(f"Failed to connect to Deepgram: {str(e)}")
+            logger.error(f"Failed to connect to Deepgram: {str(e)}", exc_info=True)
             self.is_connected = False
             raise
 
+
     async def disconnect(self):
-        """Close WebSocket connection"""
+        """Close WebSocket connection."""
         if self.websocket:
             await self.websocket.close()
             self.is_connected = False
             logger.info("Disconnected from Deepgram Voice Agent")
 
+    # --------------------------------------------------------------------------
+    # Audio Streaming
+    # --------------------------------------------------------------------------
+
+    # app/services/deepgram_flux.py
+
     async def send_audio(self, audio_data: bytes):
         """
-        Send audio from user to Voice Agent
-
-        Args:
-            audio_data: Raw audio bytes (linear16, 16kHz)
+        Send raw audio from user (linear16, 16kHz).
+        Must be sent as binary WebSocket frame.
         """
         if not self.is_connected or not self.websocket:
             logger.warning("Cannot send audio - not connected")
             return
 
         try:
-            await self.websocket.send(audio_data)
+            # Send as binary frame (not text/JSON)
+            await self.websocket.send(audio_data)  # This sends binary if audio_data is bytes
         except Exception as e:
             logger.error(f"Error sending audio: {str(e)}")
+    # --------------------------------------------------------------------------
+    # Event Loop and Message Handling
+    # --------------------------------------------------------------------------
+
+    # app/services/deepgram_flux.py
 
     async def receive_messages(self) -> AsyncIterator[Dict[str, Any]]:
         """
         Receive messages from Voice Agent
-        Yields audio output and function calls
         """
         if not self.is_connected or not self.websocket:
             logger.warning("Cannot receive - not connected")
@@ -137,65 +167,69 @@ class DeepgramVoiceAgent:
         try:
             async for message in self.websocket:
                 if isinstance(message, bytes):
-                    # Audio output from agent (TTS)
-                    yield {
-                        "type": "audio",
-                        "data": message
-                    }
+                    # Binary audio from Deepgram
+                    yield {"type": "audio", "data": message}  # ← This is correct
                 else:
-                    # JSON events (function calls, turn events, etc.)
-                    try:
-                        parsed = json.loads(message)
-                        msg_type = parsed.get("type")
+                    # JSON messages
+                    parsed = json.loads(message)
+                    yield parsed  # ← This yields JSON events
 
-                        logger.debug(f"Received event: {msg_type}")
-
-                        # Handle function calls
-                        if msg_type == "FunctionCallRequest":
-                            function_name = parsed.get("function_name")
-                            function_id = parsed.get("function_call_id")
-                            input_data = parsed.get("input", {})
-
-                            logger.info(f"Function call: {function_name}")
-
-                            # Execute the function
-                            result = await self.function_handler(function_name, input_data)
-
-                            # Send result back to agent
-                            await self.send_function_result(function_id, result)
-
-                        # Yield all events for logging/monitoring
-                        yield parsed
-
-                    except json.JSONDecodeError:
-                        logger.warning(f"Received non-JSON text: {message}")
-
-        except websockets.exceptions.ConnectionClosed:
-            logger.info("Voice Agent connection closed")
-            self.is_connected = False
         except Exception as e:
             logger.error(f"Error receiving from Voice Agent: {str(e)}")
+    # --------------------------------------------------------------------------
+    # Function Call Handling
+    # --------------------------------------------------------------------------
+
+    async def _handle_function_call(self, message: Dict[str, Any]):
+        """Handle an AgentV1FunctionCallRequest message."""
+        function_name = message.get("function_name")
+        function_id = message.get("function_call_id")
+        input_data = message.get("input", {})
+
+        logger.info(f"Function call requested: {function_name}")
+
+        try:
+            result = await self.function_handler(function_name, input_data)
+            await self.send_function_result(function_id, result)
+        except Exception as e:
+            logger.error(f"Error executing function '{function_name}': {str(e)}")
+            await self.send_function_result(function_id, {"error": str(e)})
 
     async def send_function_result(self, function_call_id: str, result: Any):
         """
-        Send function execution result back to Voice Agent
+        Send function execution result back to Deepgram.
 
         Args:
-            function_call_id: ID from the function call request
-            result: Result data to send back
+            function_call_id: ID from the AgentV1FunctionCallRequest
+            result: Result payload to send back
         """
         if not self.is_connected or not self.websocket:
-            logger.warning("Cannot send function result - not connected")
+            logger.warning(" Cannot send function result - not connected")
             return
 
         message = {
-            "type": "FunctionCallResponse",
+            "type": "AgentV1SendFunctionCallResponse",
             "function_call_id": function_call_id,
-            "output": result
+            "output": result,
         }
 
         try:
             await self.websocket.send(json.dumps(message))
-            logger.info(f"Sent function result for {function_call_id}")
+            logger.info(f"Sent function result for call {function_call_id}")
         except Exception as e:
             logger.error(f"Error sending function result: {str(e)}")
+
+    # --------------------------------------------------------------------------
+    # Helper
+    # --------------------------------------------------------------------------
+
+    def _format_functions(self) -> List[Dict[str, Any]]:
+        """Format functions for Deepgram Voice Agent API"""
+        return [
+            {
+                "name": f["name"],
+                "description": f.get("description", ""),
+                "parameters": f.get("parameters", {})
+            }
+            for f in self.functions
+        ]

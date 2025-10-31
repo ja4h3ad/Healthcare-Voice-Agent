@@ -24,7 +24,7 @@ from vonage import Vonage, Auth
 from app.webhooks.websocket_events import handle_voice_websocket, call_contexts
 from app.services.appointment_agent import AppointmentAgent
 from app.services.voice import make_call
-from app.branded_calling.first_orion import get_auth_token, send_push_notification
+from app.services.voice import get_webhook_url
 from app.telemetry.call_tracker import call_tracker
 from app.models.events.sms_events import InboundSMSEvent
 
@@ -72,21 +72,6 @@ app = FastAPI(
 )
 
 
-# ============================================================================
-# HELPER FUNCTIONS
-# ============================================================================
-
-def get_webhook_url(endpoint):
-    """
-    Construct full webhook URL from base URL and endpoint
-
-    Args:
-        endpoint (str): The webhook endpoint path
-
-    Returns:
-        str: Complete webhook URL
-    """
-    return urljoin(WEBHOOK_BASE_URL, endpoint)
 
 
 # ============================================================================
@@ -151,6 +136,7 @@ async def websocket_endpoint(websocket: WebSocket, call_id: str):
     await handle_voice_websocket(websocket, call_id)
 
 
+# app/main.py
 
 @app.post("/webhooks/sms/inbound")
 async def inbound_sms(sms: InboundSMSEvent):
@@ -174,26 +160,30 @@ async def inbound_sms(sms: InboundSMSEvent):
     # Generate unique call ID (correlation_id)
     correlation_id = call_tracker.start_auth_flow(from_number)
 
-    # Store context for WebSocket handler (keyed by correlation_id, not phone number)
+    # Store context for WebSocket handler
     call_contexts[correlation_id] = context
 
-    # Initiate the call with proper signature
+    # Initiate the call
     call_uuid = make_call(from_number, correlation_id)
 
     if call_uuid:
-        return JSONResponse(content={
-            "status": "success",
-            "message": f"Appointment reminder call initiated to {from_number}",
-            "call_uuid": call_uuid,
-            "correlation_id": correlation_id
-        })
+        return JSONResponse(
+            content={
+                "status": "success",
+                "message": f"Call initiated to {from_number}",
+                "call_uuid": call_uuid,
+                "correlation_id": correlation_id
+            },
+            status_code=200  # Explicitly set 200
+        )
 
-    return JSONResponse(content={
-        "status": "error",
-        "message": "Failed to initiate call"
-    }, status_code=500)
-
-
+    return JSONResponse(
+        content={
+            "status": "error",
+            "message": "Failed to initiate call"
+        },
+        status_code=500
+    )
 
 @app.post("/webhooks/voice/event")
 async def event_webhook(request: Request):
